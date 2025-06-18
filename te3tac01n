@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Crypto Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Script TradingView principale. Deve essere caricato una sola volta. -->
+    <!-- `async` e `defer` aiutano il caricamento non bloccante. -->
+    <script type="text/javascript" src="https://s3.tradingview.com/tv.js" async defer></script>
+  </head>
+  <body class="bg-gray-900 text-white font-sans">
+    <div class="p-4 max-w-7xl mx-auto">
+      <div class="flex flex-col sm:flex-row justify-between items-center mb-6 space-y-4 sm:space-y-0">
+        <h1 class="text-3xl sm:text-4xl font-extrabold text-blue-400">Crypto Dashboard</h1>
+        <button onclick="manualRefresh()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-lg shadow-lg transform transition-transform duration-200 hover:scale-105">
+          Aggiorna Manualmente
+        </button>
+      </div>
+      <div class="mb-2 text-sm text-gray-300">
+        <p class="text-base text-gray-400">Visualizzazione delle 9 criptovalute più volatili e liquide (escluse le stablecoin).</p>
+      </div>
+      <div class="mb-6 text-sm text-gray-300 flex flex-col sm:flex-row justify-between items-center space-y-2 sm:space-y-0">
+        <p id="countdown" class="text-base text-blue-300"></p>
+        <p id="last-update" class="text-base"></p>
+      </div>
+      <p id="loading" class="text-lg text-gray-400 text-center py-8">Analizzando il mercato...</p>
+      <div id="dashboard" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></div>
+    </div>
+
+    <script>
+      let countdownInterval; // Per tenere traccia dell'intervallo del conto alla rovescia
+
+      // Funzione per ottenere il timestamp del prossimo intervallo di 4 ore in UTC
+      function getNext4HourTimestamp() {
+        const now = new Date();
+        const next = new Date(now);
+        const hours = now.getUTCHours();
+        // Calcola il prossimo intervallo di 4 ore
+        const nextHour = Math.ceil((hours + 1) / 4) * 4;
+        next.setUTCHours(nextHour, 0, 0, 0); // Imposta minuti, secondi, millisecondi a 0
+        return next;
+      }
+
+      // Funzione per aggiornare la visualizzazione del conto alla rovescia
+      function updateCountdown() {
+        const now = new Date();
+        const next = getNext4HourTimestamp();
+        const diffMs = next - now; // Differenza in millisecondi
+
+        const hours = Math.floor(diffMs / (1000 * 60 * 60));
+        const minutes = Math.floor((diffMs / (1000 * 60)) % 60);
+        const seconds = Math.floor((diffMs / 1000) % 60);
+
+        document.getElementById('countdown').innerText = `Prossimo aggiornamento in ${hours}h ${minutes}m ${seconds}s (UTC)`;
+
+        // Se il conto alla rovescia è quasi a zero, ricarica la dashboard
+        if (diffMs <= 1000) { // Meno di 1 secondo rimanente
+          console.log("Conto alla rovescia scaduto, ricarico la dashboard...");
+          clearInterval(countdownInterval); // Ferma l'attuale conto alla rovescia
+          loadDashboard(); // Ricarica i dati
+          startCountdown(); // Riavvia il conto alla rovescia per il prossimo ciclo
+        }
+      }
+
+      // Funzione per avviare il conto alla rovescia
+      function startCountdown() {
+        // Pulisci qualsiasi intervallo precedente per evitare duplicazioni
+        if (countdownInterval) {
+          clearInterval(countdownInterval);
+        }
+        countdownInterval = setInterval(updateCountdown, 1000);
+      }
+
+      // Avvia il conto alla rovescia al caricamento iniziale
+      startCountdown();
+
+      // Funzione per recuperare i dati delle criptovalute dall'API di CoinGecko
+      async function fetchCryptoData() {
+        console.log("Fetching crypto data...");
+        const apiUrl = 'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1&sparkline=true&price_change_percentage=24h';
+        try {
+          const res = await fetch(apiUrl);
+          if (!res.ok) {
+              console.error(`HTTP error! status: ${res.status}, message: ${res.statusText}`);
+              const errorBody = await res.text();
+              throw new Error(`Errore di rete: ${res.status} - ${res.statusText}. Dettagli: ${errorBody}`);
+          }
+          const data = await res.json();
+          console.log("Dati cripto recuperati con successo:", data);
+          return data;
+        } catch (error) {
+          console.error("Errore nel recupero dei dati cripto:", error);
+          throw error;
+        }
+      }
+
+      // Funzione per formattare il prezzo come valuta USD
+      function formatPrice(price) {
+        if (price === null || price === undefined) return 'N/A';
+        return price.toLocaleString('en-US', {
+          style: 'currency',
+          currency: 'USD',
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 8
+        });
+      }
+
+      // Funzione per creare e caricare un widget TradingView MiniChart con riprovo
+      function loadTradingViewWidget(widgetContainerId, symbol, retries = 0) {
+        const MAX_RETRIES = 30; // Aumentato il numero massimo di tentativi per maggiore robustezza
+        const RETRY_DELAY_MS = 200; // Ritardo tra i tentativi in ms
+
+        const widgetDiv = document.getElementById(widgetContainerId);
+        const innerWidgetDiv = widgetDiv ? widgetDiv.querySelector('.tradingview-widget-container__widget') : null;
+
+        if (!innerWidgetDiv) {
+            console.error(`Contenitore interno del widget TradingView non trovato per l'ID: ${widgetContainerId}`);
+            return;
+        }
+        if (!symbol) {
+            console.error(`Simbolo mancante per il widget TradingView: ${widgetContainerId}`);
+            innerWidgetDiv.innerHTML = '<p class="text-xs text-red-400 text-center mt-4">Simbolo non disponibile per il grafico.</p>';
+            return;
+        }
+
+        // Verifica se TradingView.MiniChart è disponibile
+        if (typeof TradingView !== 'undefined' && typeof TradingView.MiniChart === 'function') {
+            console.log(`TradingView.MiniChart è pronto per ${symbol}. Creazione widget...`);
+            // Se c'è già un widget, distruggilo prima di crearne uno nuovo (per i refresh)
+            if (innerWidgetDiv.__tradingViewWidget) {
+                innerWidgetDiv.__tradingViewWidget.remove();
+            }
+
+            const widgetInstance = new TradingView.MiniChart({
+              "symbol": `${symbol.toUpperCase()}USDT`,
+              "width": "100%",
+              "height": "100%",
+              "locale": "it",
+              "dateRange": "6M", // Orizzonte temporale di 6 mesi
+              "colorTheme": "dark",
+              "trendLineColor": "#00bfa5",
+              "underLineColor": "rgba(0, 191, 165, 0.2)",
+              "isTransparent": true,
+              "autosize": true,
+              "displayFutureCode": false,
+              "fontColor": "#d1d5db",
+              "gridLineColor": "#2d3748",
+              "scaleFontColor": "#d1d5db",
+              "chartOnly": true, // Mostra solo il grafico, senza intestazioni/piedini
+              "allowFullScreen": false, // Non permettere il full screen
+              "noTimeScale": false, // Non nascondere la scala temporale
+              "container_id": innerWidgetDiv.id // Assicurati che l'ID sia corretto per il contenitore interno
+            });
+            widgetInstance.create();
+            // Memorizza l'istanza del widget per una potenziale rimozione futura
+            innerWidgetDiv.__tradingViewWidget = widgetInstance; 
+
+        } else if (retries < MAX_RETRIES) {
+            console.warn(`TradingView.MiniChart non ancora pronto per ${symbol}, ritento tra ${RETRY_DELAY_MS}ms. Tentativo ${retries + 1}/${MAX_RETRIES}`);
+            setTimeout(() => loadTradingViewWidget(widgetContainerId, symbol, retries + 1), RETRY_DELAY_MS);
+        } else {
+            console.error(`ERRORE: TradingView.MiniChart non è disponibile dopo ${MAX_RETRIES} tentativi per ${symbol}. Il widget non verrà caricato.`);
+            innerWidgetDiv.innerHTML = '<p class="text-xs text-red-400 text-center mt-4">Impossibile caricare il grafico (problema di caricamento libreria).</p>';
+        }
+      }
+
+      // Main function to load and display the dashboard data
+      async function loadDashboard() {
+        document.getElementById('loading').style.display = 'block';
+        document.getElementById('dashboard').innerHTML = ''; // Pulisci i contenuti precedenti
+        document.getElementById('loading').innerText = 'Analizzando il mercato...';
+        document.getElementById('loading').style.color = '#a0aec0';
+
+        try {
+          const data = await fetchCryptoData();
+
+          // Define a list of common stablecoin IDs on CoinGecko
+          const stablecoinIds = [
+            'tether', 'usd-coin', 'binance-usd', 'dai', 'true-usd',
+            'pax-gold', 'stasis-euro', 'gemini-dollar', 'frax'
+          ];
+
+          // Filter out stablecoins
+          const filteredData = data.filter(coin => !stablecoinIds.includes(coin.id));
+          console.log("Dati filtrati (stablecoin escluse):", filteredData.map(c => c.id));
+
+          // Sort the filtered data by absolute 24h price change (desc) then by total volume (desc)
+          const sortedData = filteredData.sort((a, b) => {
+            const volatilityA = Math.abs(a.price_change_percentage_24h || 0);
+            const volatilityB = Math.abs(b.price_change_percentage_24h || 0);
+            
+            // Prioritize by volatility
+            if (volatilityB - volatilityA !== 0) {
+              return volatilityB - volatilityA;
+            }
+            // If volatility is the same, sort by volume
+            return (b.total_volume || 0) - (a.total_volume || 0);
+          });
+
+          const top9 = sortedData.slice(0, 9);
+
+          const dashboard = document.getElementById('dashboard');
+          document.getElementById('loading').style.display = 'none';
+
+          if (top9.length === 0) {
+              dashboard.innerHTML = '<p class="text-center text-gray-400">Nessun dato sulle criptovalute disponibile dopo il filtro.</p>';
+              return;
+          }
+
+          top9.forEach((coin) => {
+            const card = document.createElement('div');
+            const priceChangeClass = coin.price_change_percentage_24h >= 0 ? 'text-green-400' : 'text-red-400';
+
+            const tradingViewFullChartUrl = `https://www.tradingview.com/chart/?symbol=${coin.symbol ? coin.symbol.toUpperCase() : 'N/A'}USDT`;
+            console.log(`Generato TradingView Full Chart URL per ${coin.name}: ${tradingViewFullChartUrl}`);
+
+            card.className = 'bg-gray-800 p-6 rounded-xl shadow-lg border border-gray-700 transition-all duration-300 hover:scale-[1.02] hover:shadow-2xl flex flex-col justify-between cursor-pointer';
+            card.onclick = () => window.open(tradingViewFullChartUrl, '_blank');
+
+            const widgetContainerId = `tv-widget-container-${coin.id}`; // ID per il contenitore esterno
+            const innerWidgetId = `tv-widget-inner-${coin.id}`; // ID per il contenitore interno del widget
+
+            card.innerHTML = `
+              <div class="flex items-center mb-3">
+                <img src="${coin.image}" alt="${coin.name}" class="w-8 h-8 mr-3 rounded-full shadow-inner" />
+                <h2 class="text-xl font-bold text-gray-100 flex-grow">${coin.name} <span class="text-gray-500 text-sm font-normal">(${coin.symbol ? coin.symbol.toUpperCase() : 'N/A'})</span></h2>
+              </div>
+              <p class="text-md text-gray-300 mb-1">Prezzo: <span class="font-semibold text-white">${formatPrice(coin.current_price)}</span></p>
+              <p class="text-md ${priceChangeClass} mb-3">
+                Variazione 24h: <span class="font-semibold">${coin.price_change_percentage_24h !== null && coin.price_change_percentage_24h !== undefined ? coin.price_change_percentage_24h.toFixed(2) : 'N/A'}%</span>
+              </p>
+              <p class="text-sm text-gray-500">Vol. 24h: ${formatPrice(coin.total_volume)}</p>
+              <div class="tradingview-widget-container mt-4" id="${widgetContainerId}" style="width:100%; height:150px;">
+                <div id="${innerWidgetId}" class="tradingview-widget-container__widget" style="width:100%; height:100%;"></div>
+              </div>
+            `;
+
+            dashboard.appendChild(card);
+
+            // Inizializza il widget TradingView dopo che la card è stata aggiunta al DOM
+            requestAnimationFrame(() => {
+              // Passa l'ID del contenitore esterno e il simbolo al loader del widget
+              loadTradingViewWidget(innerWidgetId, coin.symbol); // Passa l'ID del div interno al widget
+            });
+          });
+
+          const now = new Date();
+          document.getElementById('last-update').innerText = `Ultimo aggiornamento: ${now.toLocaleTimeString('it-IT')} del ${now.toLocaleDateString('it-IT')}`;
+        } catch (error) {
+          console.error("Errore critico nel caricamento della dashboard:", error);
+          document.getElementById('loading').innerText = `Errore nel caricamento dei dati: ${error.message}. Riprova più tardi.`;
+          document.getElementById('loading').style.color = 'red';
+          document.getElementById('dashboard').innerHTML = '<p class="text-center text-red-400">Impossibile caricare la dashboard. Controlla la console per i dettagli.</p>';
+        }
+      }
+
+      // Funzione per il click del pulsante di aggiornamento manuale
+      function manualRefresh() {
+        console.log("Aggiornamento manuale richiesto.");
+        document.getElementById('loading').style.display = 'block';
+        document.getElementById('loading').innerText = 'Aggiornamento manuale in corso...';
+        document.getElementById('loading').style.color = '#a0aec0';
+        loadDashboard();
+      }
+
+      // Carica la dashboard al caricamento iniziale della pagina
+      loadDashboard();
+    </script>
+  </body>
+</html>
